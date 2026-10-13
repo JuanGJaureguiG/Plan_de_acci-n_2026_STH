@@ -2,10 +2,12 @@
 // Actualizar esta fecha/hora cada vez que se recargue una nueva versión de
 // Matriz_Plan_de_Acción_2026.xlsx en el tablero (el Plan de Acción está en
 // actualización continua, esta fecha NO se recalcula sola).
-const DATA_CUTOFF = new Date(2026, 8, 22, 9, 0); // 22/09/2026 9:00 a. m.
+const DATA_CUTOFF = new Date(2026, 9, 9); // 09/10/2026 — 3er seguimiento del Plan de Acción
+const DATA_CUTOFF_HAS_TIME = false; // true solo si se conoce la hora exacta del corte
 
-function formatCutoff(d) {
+function formatCutoff(d, hasTime) {
   const datePart = d.toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' });
+  if (!hasTime) return datePart;
   const timePart = d.toLocaleTimeString('es-CO', { hour: 'numeric', minute: '2-digit', hour12: true });
   return `${datePart}, ${timePart}`;
 }
@@ -44,12 +46,14 @@ function computeProyeccion() {
 const PROY = computeProyeccion();
 
 function paceStatus(avg) {
+  if (avg === null || avg === undefined) return 'na';
   const diff = avg - PROY.pct;
   if (diff >= 0) return 'good';
   if (diff >= -15) return 'warn';
   return 'danger';
 }
-function pctColor(v) { return COLOR_MAP[paceStatus(v)]; }
+const COLOR_MAP_FULL = Object.assign({ na: '#c7cbd1' }, COLOR_MAP);
+function pctColor(v) { return COLOR_MAP_FULL[paceStatus(v)]; }
 
 // ---- Filters state ----
 const filters = { area: 'ALL', cu: 'ALL', frente: 'ALL', periodicidad: 'ALL' };
@@ -63,33 +67,40 @@ function filteredData() {
   );
 }
 
+// Promedia solo sobre acciones con dato real (norm !== null); las "N/A"
+// (sin meta asignada a ese CU/acción) se cuentan aparte y no penalizan el promedio.
 function groupAvg(rows, keyFn) {
   const map = new Map();
   rows.forEach(r => {
     const k = keyFn(r);
-    if (!map.has(k)) map.set(k, []);
-    map.get(k).push(r.norm);
+    if (!map.has(k)) map.set(k, { vals: [], naCount: 0 });
+    if (r.norm === null || r.norm === undefined) map.get(k).naCount++;
+    else map.get(k).vals.push(r.norm);
   });
-  return Array.from(map.entries()).map(([key, vals]) => ({
-    key,
-    avg: vals.reduce((a, b) => a + b, 0) / vals.length,
-    count: vals.length
-  }));
+  return Array.from(map.entries())
+    .filter(([key, g]) => g.vals.length > 0)
+    .map(([key, g]) => ({
+      key,
+      avg: g.vals.reduce((a, b) => a + b, 0) / g.vals.length,
+      count: g.vals.length,
+      naCount: g.naCount
+    }));
 }
 
 // ---- Header "corte" badge ----
 function buildCorteBadge() {
   document.getElementById('corteBadge').innerHTML = `
     <div class="cb-label">Corte de datos</div>
-    <div class="cb-value">${formatCutoff(DATA_CUTOFF)}</div>
-    <div class="cb-sub">Plan de Acción en actualización continua</div>
+    <div class="cb-value">${formatCutoff(DATA_CUTOFF, DATA_CUTOFF_HAS_TIME)}</div>
+    <div class="cb-sub">3er seguimiento · Plan de Acción en actualización continua</div>
   `;
 }
 
 // ---- KPI Row (siempre a nivel Sede completo, no se filtra) ----
 function buildKPIs() {
-  const allNorm = DATA.map(d => d.norm);
-  const avanceSede = allNorm.reduce((a, b) => a + b, 0) / allNorm.length;
+  const validNorm = DATA.filter(d => d.norm !== null && d.norm !== undefined).map(d => d.norm);
+  const naCount = DATA.length - validNorm.length;
+  const avanceSede = validNorm.reduce((a, b) => a + b, 0) / validNorm.length;
   const brecha = avanceSede - PROY.pct;
   const brechaColor = brecha >= 0 ? 'var(--teal)' : (brecha >= -10 ? 'var(--accent)' : 'var(--danger)');
   const brechaSign = brecha >= 0 ? '+' : '';
@@ -98,7 +109,7 @@ function buildKPIs() {
     <div class="kpi" style="border-left-color:var(--accent)">
       <div class="kpi-label" style="color:var(--accent)">Avance Sede</div>
       <div class="kpi-value">${avanceSede.toFixed(1)}%</div>
-      <div class="kpi-sub">Promedio de cumplimiento normalizado · ${DATA.length} acciones</div>
+      <div class="kpi-sub">Promedio sobre ${validNorm.length} acciones con dato reportado</div>
     </div>
     <div class="kpi" style="border-left-color:var(--ink)">
       <div class="kpi-label" style="color:var(--ink)">Proyección de Cumplimiento</div>
@@ -113,7 +124,7 @@ function buildKPIs() {
     <div class="kpi" style="border-left-color:var(--purple)">
       <div class="kpi-label" style="color:var(--purple)">Total de Acciones</div>
       <div class="kpi-value">${DATA.length}</div>
-      <div class="kpi-sub">${AREAS.length} Áreas · ${CUS.length} CU · ${FRENTES.length} Frentes</div>
+      <div class="kpi-sub">${AREAS.length} Áreas · ${CUS.length} CU · ${FRENTES.length} Frentes · ${naCount} sin meta aplicable (N/A)</div>
     </div>
   `;
 
@@ -121,10 +132,11 @@ function buildKPIs() {
     `<b>¿Cómo se calcula la Proyección?</b> Regla de tres dinámica: (día actual del año ÷ ${PROY.daysInYear}) × 100 — se recalcula sola cada vez que se abre el tablero, según la fecha del día.
     Es la referencia de ritmo más directamente comparable para acciones de periodicidad <b>Anual</b>; para comparar de forma homogénea acciones Mensuales, Bimestrales, Trimestrales o Semestrales, usa el filtro de Periodicidad.
     Avance Sede, Proyección y Brecha son indicadores institucionales globales y no cambian con los filtros; los gráficos, alertas y la tabla sí responden a ellos.
-    El <b>Corte de datos</b> (arriba a la derecha) es distinto: es la fecha en que se cargó la información de la matriz al tablero, y solo cambia cuando se publica una nueva versión.`;
+    Las <b>${naCount} acciones marcadas "N/A"</b> (sin meta asignada a ese CU en esa acción) se excluyen de todos los promedios — en la tabla aparecen en gris con "N/A" en vez de 0%.
+    El <b>Corte de datos</b> (arriba a la derecha) es distinto: es la fecha del último seguimiento cargado al tablero, y solo cambia cuando se publica una nueva versión de la matriz.`;
 
   document.getElementById('footerText').textContent =
-    `Datos: Matriz de Plan de Acción 2026 · UNIMINUTO Sede Tolima - Huila · Corte de datos: ${formatCutoff(DATA_CUTOFF)} · Proyección de ritmo calculada hoy, ${PROY.date.toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' })}`;
+    `Datos: Matriz de Plan de Acción 2026 · UNIMINUTO Sede Tolima - Huila · Corte de datos: ${formatCutoff(DATA_CUTOFF, DATA_CUTOFF_HAS_TIME)} · Proyección de ritmo calculada hoy, ${PROY.date.toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' })}`;
 }
 
 // ---- Sidebar filter sections ----
@@ -257,7 +269,11 @@ function buildBarChart(canvasId, groups, horizontal, labelMap) {
           titleFont: { family: 'IBM Plex Sans' },
           bodyFont: { family: 'IBM Plex Sans' },
           callbacks: {
-            label: (ctx) => `Avance: ${ctx.parsed[horizontal ? 'x' : 'y']}%  ·  n=${groups[ctx.dataIndex].count}`
+            label: (ctx) => {
+              const g = groups[ctx.dataIndex];
+              const base = `Avance: ${ctx.parsed[horizontal ? 'x' : 'y']}%  ·  n=${g.count}`;
+              return g.naCount ? `${base}  ·  ${g.naCount} N/A (no cuentan en el promedio)` : base;
+            }
           }
         }
       },
@@ -326,7 +342,7 @@ function clearEmptyStates() {
 
 // ---- Alerts (siempre sobre el dataset completo, no filtrado) ----
 function buildAlerts() {
-  const risk = [...DATA].filter(r => (r.norm - PROY.pct) < -20)
+  const risk = [...DATA].filter(r => r.norm !== null && (r.norm - PROY.pct) < -20)
     .sort((a, b) => a.norm - b.norm).slice(0, 9);
   document.getElementById('riskAlerts').innerHTML = risk.length ? risk.map(r => `
     <div class="alert-card">
@@ -342,7 +358,7 @@ function buildAlerts() {
       </div>
     </div>`).join('') : '<div class="empty-state">Ninguna acción está significativamente por debajo del ritmo esperado</div>';
 
-  const highlight = [...DATA].filter(r => (r.norm - PROY.pct) >= 20)
+  const highlight = [...DATA].filter(r => r.norm !== null && (r.norm - PROY.pct) >= 20)
     .sort((a, b) => b.norm - a.norm).slice(0, 6);
   document.getElementById('highlightAlerts').innerHTML = highlight.length ? highlight.map(r => `
     <div class="alert-card good">
@@ -368,6 +384,7 @@ function fmtPct(v) {
 }
 function pctClass(v) {
   const s = paceStatus(v);
+  if (s === 'na') return 'pct-na';
   return s === 'good' ? 'pct-high' : (s === 'warn' ? 'pct-mid' : 'pct-low');
 }
 
@@ -381,8 +398,9 @@ function buildTable() {
   });
   const tbody = document.getElementById('tableBody');
   tbody.innerHTML = rows.map(r => {
-    const barW = Math.min(100, Math.max(0, r.norm));
-    const barColor = pctColor(r.norm);
+    const isNA = r.norm === null || r.norm === undefined;
+    const barW = isNA ? 100 : Math.min(100, Math.max(0, r.norm));
+    const barColor = isNA ? '#e4e6e0' : pctColor(r.norm);
     return `<tr>
       <td style="font-size:12px;max-width:170px">${r.area}</td>
       <td style="font-size:12px;max-width:300px">${r.reto}</td>
@@ -393,7 +411,7 @@ function buildTable() {
       <td>
         <div class="bar-wrap">
           <div class="bar-bg"><div class="bar-fill" style="width:${barW}%;background:${barColor}"></div></div>
-          <span class="pct-cell ${pctClass(r.norm)}">${fmtPct(r.norm)}</span>
+          <span class="pct-cell ${pctClass(r.norm)}" title="${isNA ? 'Sin meta asignada a este CU para esta acción — no cuenta en los promedios' : ''}">${fmtPct(r.norm)}</span>
         </div>
       </td>
     </tr>`;
